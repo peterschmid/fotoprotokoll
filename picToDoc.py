@@ -1,11 +1,44 @@
 import os
 from docx import Document
 from docx.shared import Inches
-from PIL import Image
+from PIL import Image, ExifTags
 
 # Konfigurierbare Einstellungen
 BILDER_ORDNER = "Pics"  # Name des Ordners mit den Fotos
 OUTPUT_DATEI = "Fotoprotokoll.docx"
+MAX_BREITE_INCHES = 5  # Maximale Bildbreite im Dokument (angepasst)
+
+# Funktion: Bild drehen (falls nötig) & optimierte Skalierung
+def verarbeite_bild(bildpfad):
+    with Image.open(bildpfad) as img:
+        # 1. Exif-Daten prüfen und Bild richtig drehen
+        try:
+            for tag in ExifTags.TAGS:
+                if ExifTags.TAGS[tag] == "Orientation":
+                    orientation_tag = tag
+                    break
+            exif = img._getexif()
+            if exif and orientation_tag in exif:
+                orientation = exif[orientation_tag]
+                if orientation == 3:
+                    img = img.rotate(180, expand=True)
+                elif orientation == 6:
+                    img = img.rotate(270, expand=True)
+                elif orientation == 8:
+                    img = img.rotate(90, expand=True)
+        except (AttributeError, KeyError, IndexError):
+            pass  # Falls Exif-Daten fehlen, nichts tun
+
+        # 2. Bildgröße beibehalten oder leicht skalieren
+        breite, hoehe = img.size
+        faktor = (MAX_BREITE_INCHES * 96) / breite  # 96 DPI für Word
+        if faktor < 1:  # Nur verkleinern, nicht vergrößern
+            img = img.resize((int(breite * faktor), int(hoehe * faktor)), Image.LANCZOS)
+
+        # 3. Bearbeitetes Bild temporär speichern
+        tmp_bildpfad = bildpfad.replace(".", "_tmp.")
+        img.save(tmp_bildpfad, quality=95)  # Qualität beibehalten
+        return tmp_bildpfad
 
 # 1. Erstelle ein Word-Dokument
 doc = Document()
@@ -21,13 +54,8 @@ bilder = sorted(os.listdir(BILDER_ORDNER))  # Bilder sortieren
 for bild in bilder:
     if bild.lower().endswith((".png", ".jpg", ".jpeg")):
         bildpfad = os.path.join(BILDER_ORDNER, bild)
-        
-        # Optional: Bildgröße anpassen, um Speicherplatz zu sparen
-        with Image.open(bildpfad) as img:
-            breite, hoehe = img.size
-            faktor = 500 / breite  # Skaliere auf max. 500px Breite
-            img = img.resize((500, int(hoehe * faktor)))
-            img.save(bildpfad)  # Überschreibe das Bild mit der kleineren Version
+        optimiertes_bild = verarbeite_bild(bildpfad)  # Korrigiertes Bild holen
+
 
         # Füge das Bild in das Word-Dokument ein
         doc.add_paragraph(f"Bild: {bild}")

@@ -3,12 +3,19 @@ from docx import Document
 from docx.shared import Inches
 from PIL import Image, ExifTags
 
-# Konfigurierbare Einstellungen
-BILDER_ORDNER = "Pics"  # Name des Ordners mit den Fotos
+# Konfiguration
+BILDER_ORDNER = "Pics"
+OPTIMIERTER_ORDNER = "optimierte_bilder"
 OUTPUT_DATEI = "Fotoprotokoll.docx"
-MAX_BREITE_INCHES = 5  # Maximale Bildbreite im Dokument (angepasst)
+MAX_BREITE_INCHES = 6  # Maximale Bildbreite im Dokument (angepasst)
+DPI = 300  # Standard DPI für Word, um echte Zoll-Werte zu erhalten
+bildCounter = 0
 
-# Funktion: Bild drehen (falls nötig) & optimierte Skalierung
+# Stelle sicher, dass der Ordner für optimierte Bilder existiert
+if not os.path.exists(OPTIMIERTER_ORDNER):
+    os.makedirs(OPTIMIERTER_ORDNER)
+
+# Funktion: Exif-Daten entfernen, drehen & Bildgröße anpassen
 def verarbeite_bild(bildpfad):
     with Image.open(bildpfad) as img:
         # 1. Exif-Daten prüfen und Bild richtig drehen
@@ -29,16 +36,25 @@ def verarbeite_bild(bildpfad):
         except (AttributeError, KeyError, IndexError):
             pass  # Falls Exif-Daten fehlen, nichts tun
 
-        # 2. Bildgröße beibehalten oder leicht skalieren
-        breite, hoehe = img.size
-        faktor = (MAX_BREITE_INCHES * 96) / breite  # 96 DPI für Word
-        if faktor < 1:  # Nur verkleinern, nicht vergrößern
-            img = img.resize((int(breite * faktor), int(hoehe * faktor)), Image.LANCZOS)
+        # 2. Exif-Daten entfernen, damit Word keine falschen Drehungen übernimmt
+        img = img.convert("RGB")  # Konvertiere das Bild, um Exif zu entfernen
+        img.info["exif"] = None  # Lösche Exif-Daten
 
-        # 3. Bearbeitetes Bild temporär speichern
-        tmp_bildpfad = bildpfad.replace(".", "_tmp.")
-        img.save(tmp_bildpfad, quality=95)  # Qualität beibehalten
-        return tmp_bildpfad
+        # 3. Größe anpassen, aber nicht zu stark verkleinern
+        breite, hoehe = img.size
+        max_pixel_breite = int(MAX_BREITE_INCHES * DPI)  # 5 Zoll x 96 DPI
+        faktor = max_pixel_breite / breite
+        if faktor < 1:  # Nur verkleinern, nicht vergrößern
+            neue_breite = int(breite * faktor)
+            neue_hoehe = int(hoehe * faktor)
+            img = img.resize((neue_breite, neue_hoehe), Image.LANCZOS)
+
+        # 4. Bearbeitetes Bild im separaten Ordner speichern
+        bildname = os.path.basename(bildpfad)
+        optimiertes_bildpfad = os.path.join(OPTIMIERTER_ORDNER, bildname)
+        img.save(optimiertes_bildpfad, "JPEG", quality=95)  # Qualität beibehalten
+        return optimiertes_bildpfad
+
 
 # 1. Erstelle ein Word-Dokument
 doc = Document()
@@ -51,20 +67,30 @@ if not os.path.exists(BILDER_ORDNER):
 
 bilder = sorted(os.listdir(BILDER_ORDNER))  # Bilder sortieren
 
+
 for bild in bilder:
     if bild.lower().endswith((".png", ".jpg", ".jpeg")):
         bildpfad = os.path.join(BILDER_ORDNER, bild)
         optimiertes_bild = verarbeite_bild(bildpfad)  # Korrigiertes Bild holen
 
-
-        # Füge das Bild in das Word-Dokument ein
         doc.add_paragraph(f"Bild: {bild}")
-        doc.add_picture(bildpfad, width=Inches(5))  # Skaliert auf 5 Zoll Breite
+        
+        # **Sicherstellen, dass das optimierte Bild existiert**
+        if os.path.exists(optimiertes_bild):
+            doc.add_picture(optimiertes_bild, width=Inches(MAX_BREITE_INCHES))
+        else:
+            print(f"Warnung: Verkleinertes Bild {optimiertes_bild} nicht gefunden, Original wird genutzt!")
+            doc.add_picture(bildpfad, width=Inches(MAX_BREITE_INCHES))
+
         doc.add_paragraph("")  # Leerzeile für bessere Lesbarkeit
+        bildCounter += 1
+
+doc.add_paragraph(f"Anzahl Bilder: " + str(bildCounter))
 
 # 3. Speichere das Word-Dokument
 doc.save(OUTPUT_DATEI)
 print(f"Dokument gespeichert als {OUTPUT_DATEI}")
+print(f"Optimierte Bilder wurden gespeichert in '{OPTIMIERTER_ORDNER}'")
 
 # 4. (Optional) Word-Datei in PDF umwandeln
 try:

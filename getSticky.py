@@ -2,98 +2,96 @@ import cv2
 import numpy as np
 import os
 
-# Parameter
-BILD_PFAD = "postit.jpg"             # Pfad zum Eingangsbild
-OUTPUT_ORDNER = "postit_ausgeschnitten"  # Ordner für ausgeschnittene Post-its
-MIN_BREITE = 50                      # Mindestbreite eines Post-its
-MIN_HOEHE = 50                       # Mindesthöhe eines Post-its
-OVERLAP_THRESHOLD = 0.1              # IoU-Schwelle (Intersection over Union) für NMS
+# 1) Einstellungen anpassen
+BILD_PFAD = "postit.jpg"              # Pfad zum Eingangsbild
+OUTPUT_ORDNER = "postit_ausgeschnitten"
+MIN_FLAECHE = 500                     # Minimale Konturfläche, um Kleinstes zu filtern
+THRESHOLD_S = 50                      # Sättigungs-Schwelle (je höher, desto strenger)
 
-# Sicherstellen, dass der Ausgabeordner existiert
+# Ordner für Ergebnisbilder
 if not os.path.exists(OUTPUT_ORDNER):
     os.makedirs(OUTPUT_ORDNER)
 
-# Bild laden
+def order_points(pts):
+    """
+    Sortiert 4 Punkte eines Vierecks in der Reihenfolge:
+    [oben-links, oben-rechts, unten-rechts, unten-links]
+    """
+    rect = np.zeros((4, 2), dtype="float32")
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]
+    rect[2] = pts[np.argmax(s)]
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]
+    rect[3] = pts[np.argmax(diff)]
+    return rect
+
+def four_point_transform(image, pts):
+    """
+    Perspektivische Transformation: 'zieht' ein Viereck so,
+    dass wir ein aufrechtes, rechteckiges Bild erhalten.
+    """
+    rect = order_points(pts)
+    (tl, tr, br, bl) = rect
+
+    # Breite berechnen
+    widthA = np.linalg.norm(br - bl)
+    widthB = np.linalg.norm(tr - tl)
+    maxWidth = int(max(widthA, widthB))
+
+    # Höhe berechnen
+    heightA = np.linalg.norm(br - tr)
+    heightB = np.linalg.norm(bl - tl)
+    maxHeight = int(max(heightA, heightB))
+
+    # Ziel-Koordinaten definieren
+    dst = np.array([
+        [0, 0],
+        [maxWidth - 1, 0],
+        [maxWidth - 1, maxHeight - 1],
+        [0, maxHeight - 1]], dtype="float32")
+
+    # Transformation anwenden
+    M = cv2.getPerspectiveTransform(rect, dst)
+    warped = cv2.warpPerspective(image, M, (maxWidth, maxHeight))
+    return warped
+
+# 2) Bild laden
 bild = cv2.imread(BILD_PFAD)
 if bild is None:
     print("Fehler: Bild konnte nicht geladen werden.")
     exit()
 
-# Bildvorverarbeitung: in Graustufen umwandeln, Rauschen reduzieren, Kanten finden
-grau = cv2.cvtColor(bild, cv2.COLOR_BGR2GRAY)
-gauss = cv2.GaussianBlur(grau, (5, 5), 0)
-kanten = cv2.Canny(gauss, 50, 150)
+# 3) In HSV umwandeln und nur Sättigung (S-Channel) extrahieren
+hsv = cv2.cvtColor(bild, cv2.COLOR_BGR2HSV)
+s_channel = hsv[:, :, 1]
 
-# Konturen im Bild finden
-konturen, _ = cv2.findContours(kanten, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+# 4) Threshold auf die Sättigung anwenden: alles über 'THRESHOLD_S' gilt als "farbig"
+_, mask_s = cv2.threshold(s_channel, THRESHOLD_S, 255, cv2.THRESH_BINARY)
 
-# Alle relevanten Bounding Boxes sammeln
-boxes = []
-for kontur in konturen:
-    x, y, w, h = cv2.boundingRect(kontur)
-    if w < MIN_BREITE or h < MIN_HOEHE:
-        continue
-    boxes.append([x, y, x+w, y+h])
+# 5) Rauschen entfernen (morphologische Operationen)
+kernel = np.ones((5, 5), np.uint8)
+mask_s = cv2.morphologyEx(mask_s, cv2.MORPH_OPEN, kernel, iterations=1)
+mask_s = cv2.morphologyEx(mask_s, cv2.MORPH_CLOSE, kernel, iterations=1)
 
-boxes = np.array(boxes)
-if boxes.size == 0:
-    print("Keine Post-its erkannt.")
-    exit()
+# 6) Konturen in der Maske finden
+konturen, _ = cv2.findContours(mask_s, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-# --- Non-Maximum Suppression (NMS) Funktion ---
-def non_max_suppression_fast(boxes, overlapThresh):
-    """
-    Führt Non-Maximum Suppression auf den übergebenen Bounding Boxes durch.
-    boxes: numpy Array im Format [[x1, y1, x2, y2], ...]
-    overlapThresh: Schwellenwert, ab dem Boxen als überlappend gelten
-    Rückgabe: gefilterte Boxen
-    """
-    if len(boxes) == 0:
-        return []
-    
-    boxes = boxes.astype("float")
-    pick = []
-
-    # Koordinaten extrahieren
-    x1 = boxes[:, 0]
-    y1 = boxes[:, 1]
-    x2 = boxes[:, 2]
-    y2 = boxes[:, 3]
-
-    # Fläche jeder Box berechnen und nach dem unteren rechten y-Wert sortieren
-    area = (x2 - x1 + 1) * (y2 - y1 + 1)
-    idxs = np.argsort(y2)
-
-    while len(idxs) > 0:
-        i = idxs[-1]            # Box mit dem größten y2-Wert (kann als repräsentativ betrachtet werden)
-        pick.append(i)
-
-        # Überschneidung mit allen anderen Boxen berechnen
-        xx1 = np.maximum(x1[i], x1[idxs[:-1]])
-        yy1 = np.maximum(y1[i], y1[idxs[:-1]])
-        xx2 = np.minimum(x2[i], x2[idxs[:-1]])
-        yy2 = np.minimum(y2[i], y2[idxs[:-1]])
-
-        w = np.maximum(0, xx2 - xx1 + 1)
-        h = np.maximum(0, yy2 - yy1 + 1)
-
-        overlap = (w * h) / area[idxs[:-1]]
-
-        # Alle Boxen löschen, die zu stark überlappen
-        idxs = np.delete(idxs, np.concatenate(([len(idxs)-1], np.where(overlap > overlapThresh)[0])))
-    
-    return boxes[pick].astype("int")
-
-# NMS auf die gefundenen Boxen anwenden
-filtered_boxes = non_max_suppression_fast(boxes, OVERLAP_THRESHOLD)
-
-# Die gefilterten Post-its ausschneiden und speichern
 postit_index = 1
-for (x1, y1, x2, y2) in filtered_boxes:
-    postit = bild[y1:y2, x1:x2]
+for cnt in konturen:
+    area = cv2.contourArea(cnt)
+    if area < MIN_FLAECHE:
+        continue  # zu klein, wahrscheinlich kein Post-it
+
+    # 7) Gedrehtes Rechteck bestimmen und 'geradeziehen'
+    rect = cv2.minAreaRect(cnt)
+    box = cv2.boxPoints(rect).astype("float32")
+    warped = four_point_transform(bild, box)
+
+    # 8) Speichern
     filename = os.path.join(OUTPUT_ORDNER, f"postit_{postit_index}.jpg")
-    cv2.imwrite(filename, postit)
+    cv2.imwrite(filename, warped)
     print("Gespeichert:", filename)
     postit_index += 1
 
-print(f"Es wurden {postit_index-1} Post-its gespeichert in '{OUTPUT_ORDNER}'.")
+print(f"Es wurden {postit_index - 1} Post-its gespeichert in '{OUTPUT_ORDNER}'.")

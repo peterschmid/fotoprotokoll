@@ -5,6 +5,7 @@ from PIL import Image, ExifTags
 
 # Konfiguration
 BILDER_ORDNER = "Pics"
+INPUT_DATEI = "Fotoprotokoll_template.docx"
 OPTIMIERTER_ORDNER = "optimierte_bilder"
 OUTPUT_DATEI = "Fotoprotokoll.docx"
 MAX_BREITE_INCHES = 6  # Maximale Bildbreite im Dokument (angepasst)
@@ -57,7 +58,7 @@ def verarbeite_bild(bildpfad):
 
 
 # 1. Erstelle ein Word-Dokument
-doc = Document()
+doc = Document(INPUT_DATEI)
 doc.add_heading("Fotoprotokoll", level=1)
 
 # 2. Durchlaufe alle Bilder im Ordner

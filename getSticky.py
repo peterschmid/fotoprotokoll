@@ -2,16 +2,32 @@ import cv2
 import numpy as np
 import os
 
-# 1) Einstellungen anpassen
-BILD_PFAD = "postit.jpg"              # Pfad zum Eingangsbild
+# -------------------------------------------------------------
+# 1) Parameter anpassen
+# -------------------------------------------------------------
+BILD_PFAD = "postit.jpg"
 OUTPUT_ORDNER = "postit_ausgeschnitten"
-MIN_FLAECHE = 500                     # Minimale Konturfläche, um Kleinstes zu filtern
-THRESHOLD_S = 50                      # Sättigungs-Schwelle (je höher, desto strenger)
 
-# Ordner für Ergebnisbilder
-if not os.path.exists(OUTPUT_ORDNER):
-    os.makedirs(OUTPUT_ORDNER)
+# Minimale Konturfläche
+MIN_FLAECHE = 500
 
+# Seitenverhältnis-Bereich (Breite/Höhe)
+MIN_RATIO = 0.6
+MAX_RATIO = 1.8
+
+# HSV-Farbbereiche für typische Post-it-Farben (Richtwerte!)
+# Du kannst mehr oder weniger Farben hinzufügen
+COLOR_RANGES = {
+    "orange": ((10, 100, 150), (30, 180, 255)),
+    "blue": ((88, 117, 150), (108, 177, 210)),
+    "green": ((64, 128, 112), (84, 188, 172)),
+    "yellow": ((14, 200, 180), (34, 255, 255)),
+    "pink":   ((140, 50, 50), (170, 255, 255)),
+}
+
+# -------------------------------------------------------------
+# 2) Hilfsfunktionen
+# -------------------------------------------------------------
 def order_points(pts):
     """
     Sortiert 4 Punkte eines Vierecks in der Reihenfolge:
@@ -28,70 +44,95 @@ def order_points(pts):
 
 def four_point_transform(image, pts):
     """
-    Perspektivische Transformation: 'zieht' ein Viereck so,
-    dass wir ein aufrechtes, rechteckiges Bild erhalten.
+    Führt eine perspektivische Transformation durch, sodass das
+    durch pts definierte Viereck "gerade gezogen" wird.
     """
     rect = order_points(pts)
     (tl, tr, br, bl) = rect
 
-    # Breite berechnen
+    # Breiten berechnen
     widthA = np.linalg.norm(br - bl)
     widthB = np.linalg.norm(tr - tl)
     maxWidth = int(max(widthA, widthB))
 
-    # Höhe berechnen
+    # Höhen berechnen
     heightA = np.linalg.norm(br - tr)
     heightB = np.linalg.norm(bl - tl)
     maxHeight = int(max(heightA, heightB))
 
-    # Ziel-Koordinaten definieren
+    # Zielkoordinaten definieren
     dst = np.array([
         [0, 0],
         [maxWidth - 1, 0],
         [maxWidth - 1, maxHeight - 1],
         [0, maxHeight - 1]], dtype="float32")
 
-    # Transformation anwenden
     M = cv2.getPerspectiveTransform(rect, dst)
     warped = cv2.warpPerspective(image, M, (maxWidth, maxHeight))
     return warped
 
-# 2) Bild laden
+# -------------------------------------------------------------
+# 3) Bild laden
+# -------------------------------------------------------------
 bild = cv2.imread(BILD_PFAD)
 if bild is None:
-    print("Fehler: Bild konnte nicht geladen werden.")
-    exit()
+    raise IOError(f"Bild '{BILD_PFAD}' konnte nicht geladen werden.")
 
-# 3) In HSV umwandeln und nur Sättigung (S-Channel) extrahieren
+if not os.path.exists(OUTPUT_ORDNER):
+    os.makedirs(OUTPUT_ORDNER)
+
+# -------------------------------------------------------------
+# 4) HSV-Konvertierung und Farbmasken erstellen
+# -------------------------------------------------------------
 hsv = cv2.cvtColor(bild, cv2.COLOR_BGR2HSV)
-s_channel = hsv[:, :, 1]
 
-# 4) Threshold auf die Sättigung anwenden: alles über 'THRESHOLD_S' gilt als "farbig"
-_, mask_s = cv2.threshold(s_channel, THRESHOLD_S, 255, cv2.THRESH_BINARY)
+# Leere Maske für alle erlaubten Farben
+mask_total = np.zeros(hsv.shape[:2], dtype="uint8")
 
-# 5) Rauschen entfernen (morphologische Operationen)
+# Für jede definierte Farbe eine Maske erstellen und mit bitwise_or vereinen
+for color_name, (lower, upper) in COLOR_RANGES.items():
+    lower = np.array(lower, dtype="uint8")
+    upper = np.array(upper, dtype="uint8")
+    mask_color = cv2.inRange(hsv, lower, upper)
+    mask_total = cv2.bitwise_or(mask_total, mask_color)
+
+# Optional: Morphologische Operationen, um Rauschen zu entfernen
 kernel = np.ones((5, 5), np.uint8)
-mask_s = cv2.morphologyEx(mask_s, cv2.MORPH_OPEN, kernel, iterations=1)
-mask_s = cv2.morphologyEx(mask_s, cv2.MORPH_CLOSE, kernel, iterations=1)
+mask_total = cv2.morphologyEx(mask_total, cv2.MORPH_OPEN, kernel, iterations=1)
+mask_total = cv2.morphologyEx(mask_total, cv2.MORPH_CLOSE, kernel, iterations=1)
 
-# 6) Konturen in der Maske finden
-konturen, _ = cv2.findContours(mask_s, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+# -------------------------------------------------------------
+# 5) Konturen finden
+# -------------------------------------------------------------
+contours, _ = cv2.findContours(mask_total, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
 postit_index = 1
-for cnt in konturen:
+for cnt in contours:
     area = cv2.contourArea(cnt)
     if area < MIN_FLAECHE:
-        continue  # zu klein, wahrscheinlich kein Post-it
+        continue
 
-    # 7) Gedrehtes Rechteck bestimmen und 'geradeziehen'
+    # Rotiertes Rechteck bestimmen
     rect = cv2.minAreaRect(cnt)
+    (cx, cy), (w, h), angle = rect
+
+    # Seitenverhältnis (Breite/Höhe) prüfen
+    if w == 0 or h == 0:
+        continue
+    ratio = w / h if w > h else h / w  # Immer >= 1
+    if ratio < MIN_RATIO or ratio > MAX_RATIO:
+        continue
+
+    # Box-Eckpunkte
     box = cv2.boxPoints(rect).astype("float32")
+
+    # Perspektivische Transformation
     warped = four_point_transform(bild, box)
 
-    # 8) Speichern
+    # Ergebnis speichern
     filename = os.path.join(OUTPUT_ORDNER, f"postit_{postit_index}.jpg")
     cv2.imwrite(filename, warped)
-    print("Gespeichert:", filename)
+    print(f"Gespeichert: {filename}")
     postit_index += 1
 
-print(f"Es wurden {postit_index - 1} Post-its gespeichert in '{OUTPUT_ORDNER}'.")
+print(f"Fertig! {postit_index - 1} Post-its gespeichert in '{OUTPUT_ORDNER}'.")
